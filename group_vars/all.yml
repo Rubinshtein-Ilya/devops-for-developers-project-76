@@ -1,0 +1,6 @@
+---
+pip_install_packages:
+  - name: docker
+
+docker_users:
+  - "{{ ansible_user | default(ansible_user_id) }}"
