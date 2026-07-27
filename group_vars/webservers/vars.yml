@@ -1,0 +1,16 @@
+---
+redmine_port: 8080
+redmine_dir: /opt/redmine
+
+redmine_image: redmine:6.1
+redmine_container: redmine
+redmine_files_volume: redmine_files
+
+redmine_db_host: c-a0durkqssggbc2pu0mga.rw.mdb.yandexcloud.kz
+redmine_db_port: 6432
+redmine_db_name: db1
+redmine_db_user: ubuntu
+redmine_db_sslmode: require
+
+redmine_db_password: "{{ vault_redmine_db_password }}"
+redmine_secret_key_base: "{{ vault_redmine_secret_key_base }}"
