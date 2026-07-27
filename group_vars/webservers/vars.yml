@@ -1,0 +1,52 @@
+---
+redmine_port: 8080
+redmine_dir: /opt/redmine
+
+redmine_image: redmine:6.1
+redmine_container: redmine
+redmine_files_volume: redmine_files
+
+redmine_db_host: c-a0durkqssggbc2pu0mga.rw.mdb.yandexcloud.kz
+redmine_db_port: 6432
+redmine_db_name: db1
+redmine_db_user: ubuntu
+redmine_db_sslmode: require
+
+redmine_db_password: "{{ vault_redmine_db_password }}"
+redmine_secret_key_base: "{{ vault_redmine_secret_key_base }}"
+
+redmine_public_url: https://rubinshtein.online/
+
+datadog_api_key: "{{ vault_datadog_api_key }}"
+datadog_site: datadoghq.com
+datadog_agent_major_version: 7
+
+datadog_config:
+  tags:
+    - "env:production"
+    - "service:redmine"
+    - "role:webserver"
+
+datadog_checks:
+  http_check:
+    init_config:
+    instances:
+      - name: "redmine on {{ inventory_hostname }}"
+        url: "http://127.0.0.1:{{ redmine_port }}/"
+        timeout: 5
+        collect_response_time: true
+        http_response_status_code: "200"
+        tags:
+          - "service:redmine"
+          - "check:local"
+          - "host_alias:{{ inventory_hostname }}"
+      - name: "redmine public endpoint"
+        url: "{{ redmine_public_url }}"
+        timeout: 10
+        collect_response_time: true
+        check_certificate_expiration: true
+        days_warning: 14
+        days_critical: 7
+        tags:
+          - "service:redmine"
+          - "check:public"

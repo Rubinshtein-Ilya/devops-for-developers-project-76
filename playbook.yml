@@ -1,6 +1,6 @@
 ---
 - name: Prepare servers for deploy
-  hosts: all
+  hosts: webservers
   become: true
   tags: setup
 
@@ -15,7 +15,7 @@
     - geerlingguy.docker
 
 - name: Deploy Redmine
-  hosts: all
+  hosts: webservers
   become: true
   tags: deploy
 
@@ -31,49 +31,19 @@
         src: templates/.env.j2
         dest: "{{ redmine_dir }}/.env"
         mode: "0600"
-
-    - name: Ensure docker network exists
-      community.docker.docker_network:
-        name: "{{ redmine_network }}"
-        state: present
-
-    - name: Run PostgreSQL container
-      community.docker.docker_container:
-        name: "{{ redmine_db_container }}"
-        image: "{{ redmine_db_image }}"
-        env_file: "{{ redmine_dir }}/.env"
-        networks:
-          - name: "{{ redmine_network }}"
-        volumes:
-          - "{{ redmine_db_volume }}:/var/lib/postgresql/data"
-        healthcheck:
-          test: ["CMD-SHELL", "pg_isready -U {{ redmine_db_user }} -d {{ redmine_db_name }}"]
-          interval: 5s
-          timeout: 5s
-          retries: 12
-        restart_policy: unless-stopped
-        state: started
-
-    - name: Wait for PostgreSQL to become healthy
-      community.docker.docker_container_info:
-        name: "{{ redmine_db_container }}"
-      register: redmine_db_state
-      until: redmine_db_state.container.State.Health.Status | default('starting') == 'healthy'
-      retries: 30
-      delay: 5
+      register: redmine_env
 
     - name: Run Redmine container
       community.docker.docker_container:
         name: "{{ redmine_container }}"
         image: "{{ redmine_image }}"
         env_file: "{{ redmine_dir }}/.env"
-        networks:
-          - name: "{{ redmine_network }}"
         published_ports:
           - "{{ redmine_port }}:3000"
         volumes:
           - "{{ redmine_files_volume }}:/usr/src/redmine/files"
         restart_policy: unless-stopped
+        recreate: "{{ redmine_env.changed }}"
         state: started
 
     - name: Wait for Redmine to answer over HTTP
@@ -84,3 +54,22 @@
       until: redmine_http.status == 200
       retries: 40
       delay: 5
+
+- name: Set up Datadog monitoring
+  hosts: webservers
+  become: true
+  tags: monitoring
+
+  pre_tasks:
+    - name: Ensure the Datadog API key is set
+      ansible.builtin.assert:
+        that:
+          - datadog_api_key is defined
+          - datadog_api_key | length == 32
+        fail_msg: >-
+          Put a real Datadog API key into vault_datadog_api_key
+          (make vault-edit): it must be 32 characters long.
+        quiet: true
+
+  roles:
+    - datadog.dd.agent

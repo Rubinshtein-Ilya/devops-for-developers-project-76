@@ -4,9 +4,10 @@
 # Деплой Redmine с помощью Ansible
 
 Учебный проект: Ansible готовит два сервера к работе (Docker и его зависимости),
-а затем разворачивает на них [Redmine](https://hub.docker.com/_/redmine) в Docker
-вместе с базой PostgreSQL. Трафик распределяет балансировщик, приложение
-доступно по домену через HTTPS.
+а затем разворачивает на них [Redmine](https://hub.docker.com/_/redmine) в Docker.
+Данные приложение хранит в общей управляемой базе PostgreSQL, которая живёт
+отдельно от серверов. Трафик распределяет балансировщик, приложение доступно
+по домену через HTTPS.
 
 ## Задеплоенное приложение
 
@@ -30,13 +31,22 @@
             web1 94.131.84.114     web2 94.131.80.53
             ┌──────────────────┐   ┌──────────────────┐
             │ redmine   :8080  │   │ redmine   :8080  │
-            │ redmine-db (PG)  │   │ redmine-db (PG)  │
+            │ datadog-agent    │   │ datadog-agent    │
             └──────────────────┘   └──────────────────┘
+                    |                     |
+                    └──────────┬──────────┘
+                               v
+                 Managed Service for PostgreSQL
+                 кластер postgresql524, база db1
+                 c-a0durkqssggbc2pu0mga.rw.mdb.yandexcloud.kz:6432
 ```
 
-На каждом сервере поднимаются два контейнера в общей Docker-сети
-`redmine_net`: сама Redmine и PostgreSQL. Данные лежат в именованных
-Docker-томах, поэтому переживают перезапуск контейнеров.
+На каждом сервере работает один контейнер — сама Redmine. База данных общая:
+управляемый кластер PostgreSQL в том же облаке, в сети `app-network`.
+Оба сервера видят одни и те же задачи и одного и того же пользователя,
+независимо от того, на какой сервер попадёт запрос от балансировщика.
+Загруженные файлы по-прежнему лежат в Docker-томе на каждом сервере
+(`redmine_files`).
 
 ## Требования
 
@@ -55,14 +65,15 @@ python3 -m pip install --user ansible
 
 | Файл | Назначение |
 | --- | --- |
-| `playbook.yml` | плейбук: подготовка серверов (тег `setup`) и деплой (тег `deploy`) |
+| `playbook.yml` | плейбук: подготовка серверов (тег `setup`), деплой (тег `deploy`) и мониторинг (тег `monitoring`) |
 | `inventory.ini` | список серверов, группа `webservers` |
 | `ansible.cfg` | инвентарь по умолчанию и путь к паролю от vault |
 | `requirements.yml` | зависимости Ansible Galaxy: роли и коллекция |
-| `group_vars/all/vars.yml` | открытые переменные |
-| `group_vars/all/vault.yml` | секреты, зашифрованы `ansible-vault` |
-| `templates/.env.j2` | шаблон файла переменных окружения для контейнеров |
-| `Makefile` | команды установки, подготовки серверов и деплоя |
+| `group_vars/all/vars.yml` | переменные для ролей Galaxy (pip, docker) |
+| `group_vars/webservers/vars.yml` | открытые переменные приложения и подключения к БД |
+| `group_vars/webservers/vault.yml` | секреты, файл целиком зашифрован `ansible-vault` |
+| `templates/.env.j2` | шаблон файла переменных окружения для контейнера |
+| `Makefile` | команды установки, деплоя и работы с секретами |
 
 ## Подготовка
 
@@ -88,7 +99,7 @@ web2 ansible_host=203.0.113.11 ansible_user=ubuntu ansible_ssh_private_key_file=
 ### 2. Положить пароль от vault
 
 Секреты (пароль базы и `secret_key_base`) лежат в зашифрованном файле
-`group_vars/all/vault.yml`. Чтобы Ansible смог их прочитать, создайте в корне
+`group_vars/webservers/vault.yml`. Чтобы Ansible смог их прочитать, создайте в корне
 проекта файл `.vault_pass` с паролем одной строкой:
 
 ```bash
@@ -108,7 +119,8 @@ make install
 
 Ставятся роли [geerlingguy.pip](https://galaxy.ansible.com/ui/standalone/roles/geerlingguy/pip/),
 [geerlingguy.docker](https://galaxy.ansible.com/ui/standalone/roles/geerlingguy/docker/)
-и коллекция [community.docker](https://galaxy.ansible.com/ui/repo/published/community/docker/).
+и коллекции [community.docker](https://galaxy.ansible.com/ui/repo/published/community/docker/)
+и [datadog.dd](https://galaxy.ansible.com/ui/repo/published/datadog/dd/) (агент мониторинга).
 
 Коллекция закреплена на ветке 4.x: версии 5.x требуют ansible-core 2.17 и новее.
 Если у вас ansible-core 2.17+, ограничение в `requirements.yml` можно снять.
@@ -139,6 +151,40 @@ make setup
 
 Достаточно выполнить один раз при создании серверов.
 
+## Ручной запуск (проверка перед деплоем)
+
+Прежде чем автоматизировать деплой, полезно один раз поднять Redmine руками
+и убедиться, что он видит управляемую базу. Заходим на сервер и запускаем
+контейнер, передав настройки подключения переменными окружения:
+
+```bash
+ssh ubuntu@94.131.84.114
+
+export REDMINE_DB_PASSWORD='пароль_пользователя_базы'
+
+docker run -d --name redmine-manual -p 8081:3000 \
+  -e REDMINE_DB_POSTGRES=c-a0durkqssggbc2pu0mga.rw.mdb.yandexcloud.kz \
+  -e REDMINE_DB_PORT=6432 \
+  -e REDMINE_DB_DATABASE=db1 \
+  -e REDMINE_DB_USERNAME=ubuntu \
+  -e REDMINE_DB_PASSWORD \
+  -e PGSSLMODE=require \
+  redmine:6.1
+```
+
+Пароль передаётся через переменную окружения без значения
+(`-e REDMINE_DB_PASSWORD`) — Docker берёт его из текущей сессии, и он
+не остаётся в списке процессов сервера.
+
+При первом запуске Redmine сам создаёт схему в базе. Проверяем и убираем
+за собой:
+
+```bash
+curl -I http://127.0.0.1:8081/     # ожидаем 200
+docker logs --tail 20 redmine-manual
+docker rm -f redmine-manual
+```
+
 ## Деплой приложения
 
 ```bash
@@ -150,54 +196,95 @@ make deploy
 
 1. создаётся каталог `/opt/redmine`;
 2. из шаблона `templates/.env.j2` генерируется файл `/opt/redmine/.env`
-   с переменными окружения (права `0600`);
-3. создаётся Docker-сеть `redmine_net`;
-4. запускается контейнер PostgreSQL, плейбук ждёт, пока он станет `healthy`;
-5. запускается контейнер Redmine, порт `redmine_port` пробрасывается
-   на порт 3000 внутри контейнера;
-6. плейбук ждёт, пока приложение начнёт отвечать `200` по HTTP.
+   с переменными окружения (права `0600`) — там адрес управляемой базы
+   и пароль, расшифрованный из vault;
+3. запускается контейнер Redmine, порт `redmine_port` пробрасывается
+   на порт 3000 внутри контейнера; если `.env` изменился, контейнер
+   пересоздаётся, чтобы подхватить новые переменные;
+4. плейбук ждёт, пока приложение начнёт отвечать `200` по HTTP.
 
-Оба контейнера читают переменные окружения через опцию `env_file`, то есть
-пароли не видны ни в командной строке, ни в выводе Ansible.
+Контейнер читает переменные окружения через опцию `env_file`, то есть
+пароль не виден ни в командной строке, ни в выводе Ansible.
 
 Плейбук идемпотентный: повторный запуск не пересоздаёт контейнеры,
 если ничего не изменилось (`changed=0`).
 
 ## Переменные
 
-Открытые переменные — `group_vars/all/vars.yml`:
+Открытые переменные — `group_vars/webservers/vars.yml`:
 
 | Переменная | Значение | Описание |
 | --- | --- | --- |
 | `redmine_port` | `8080` | внешний порт контейнера Redmine на сервере |
 | `redmine_dir` | `/opt/redmine` | каталог приложения, там лежит `.env` |
-| `redmine_network` | `redmine_net` | Docker-сеть для контейнеров |
 | `redmine_image` | `redmine:6.1` | образ приложения |
-| `redmine_db_image` | `postgres:17-alpine` | образ базы данных |
-| `redmine_db_name` | `redmine` | имя базы |
-| `redmine_db_user` | `redmine` | пользователь базы |
+| `redmine_db_host` | `c-a0durkqssggbc2pu0mga.rw.mdb.yandexcloud.kz` | адрес мастера кластера |
+| `redmine_db_port` | `6432` | порт пула соединений управляемой базы |
+| `redmine_db_name` | `db1` | имя базы |
+| `redmine_db_user` | `ubuntu` | пользователь базы |
+| `redmine_db_sslmode` | `require` | режим шифрования соединения с базой |
+| `redmine_public_url` | `https://rubinshtein.online/` | публичный адрес приложения, его проверяет `http_check` |
+| `datadog_site` | `datadoghq.com` | регион аккаунта DataDog, куда агент шлёт данные |
+| `datadog_agent_major_version` | `7` | мажорная версия агента |
+| `datadog_config` | теги `env`, `service`, `role` | содержимое основного конфига агента `datadog.yaml` |
+| `datadog_checks` | `http_check` | конфигурации интеграций агента |
 
-Секреты — `group_vars/all/vault.yml` (зашифрован):
+Переменные для ролей Galaxy (`pip_install_packages`, `docker_users`) остались
+в `group_vars/all/vars.yml` — они нужны всем хостам, а не только веб-серверам.
+
+Секреты — `group_vars/webservers/vault.yml` (зашифрован):
 
 | Переменная | Описание |
 | --- | --- |
 | `vault_redmine_db_password` | пароль пользователя базы |
 | `vault_redmine_secret_key_base` | ключ Redmine для подписи сессий |
+| `vault_datadog_api_key` | API-ключ аккаунта DataDog |
 
 В `vars.yml` они подключаются ссылками, например
 `redmine_db_password: "{{ vault_redmine_db_password }}"` — сразу видно, что
-значение приходит из vault.
+значение приходит из vault. Такое разделение позволяет держать в открытом
+виде всё, что не секрет, и шифровать целиком только файл с паролями.
 
 Работа с секретами:
 
 ```bash
-make vault-view   # посмотреть содержимое
-make vault-edit   # отредактировать (откроется $EDITOR)
+make vault-view      # посмотреть содержимое
+make vault-edit      # отредактировать (откроется $EDITOR)
+make vault-encrypt   # зашифровать файл (после ручного создания)
+make vault-decrypt   # расшифровать файл на диске
+make vault-rekey     # сменить пароль шифрования
 ```
 
-Пароль базы применяется только при первом создании контейнера PostgreSQL.
-Если поменять его позже, старая база не примет новый пароль — придётся
-удалить том `redmine_db_data` вместе с данными.
+Пароль базы задаётся в консоли облака (кластер → «Пользователи» →
+«Изменить пароль»). После смены достаточно вписать новый пароль через
+`make vault-edit` и выполнить `make deploy` — плейбук перезапишет `.env`
+и пересоздаст контейнер.
+
+## Управляемая база данных
+
+Приложение работает с кластером **Managed Service for PostgreSQL**
+`postgresql524` (идентификатор `a0durkqssggbc2pu0mga`, версия 17, два хоста
+в зоне `kz1-a`, режим высокой доступности).
+
+Подключение идёт по имени `c-<идентификатор_кластера>.rw.mdb.yandexcloud.kz` —
+это постоянный адрес текущего мастера. Если облако переключит роль мастера
+на второй хост, адрес останется прежним и приложение продолжит работать.
+Полное имя конкретного хоста — это имя из колонки «FQDN хоста» в консоли плюс
+суффикс `.mdb.yandexcloud.kz`; консоль показывает только короткую часть.
+
+Порт **6432** — подключение через пул соединений (pgbouncer). Прямое
+подключение к базе идёт на 5432, но через пул экономнее: Redmine держит
+несколько соединений постоянно, а лимит подключений у пользователя — 50.
+
+Соединение обязательно шифруется, поэтому в `.env` передаётся `PGSSLMODE`.
+Значение `require` включает шифрование без проверки сертификата сервера —
+для учебного проекта этого достаточно. Для `verify-full` пришлось бы
+положить на каждый сервер CA-сертификат облака.
+
+Сеть настроена так: кластер и обе виртуальные машины находятся в облачной
+сети `app-network`, группа безопасности кластера `db-sg` разрешает входящие
+подключения по TCP на порт 6432 из группы безопасности серверов `vm-sg`.
+Трафик до базы не выходит в интернет.
 
 ## Балансировщик и HTTPS
 
@@ -239,6 +326,163 @@ _acme-challenge.rubinshtein.online. CNAME <идентификатор_серти
 проверка не пройдёт. После выпуска сертификат выбирается в настройках
 обработчика на порту 443.
 
+## Мониторинг: агент DataDog
+
+На каждый сервер группы `webservers` ставится агент
+[DataDog](https://www.datadoghq.com/) — небольшая служба, которая раз в
+несколько секунд снимает показатели сервера (процессор, память, диск, сеть)
+и отправляет их в облако DataDog. Там из них строятся графики и настраиваются
+оповещения: если приложение перестанет отвечать или закончится память, придёт
+уведомление.
+
+Ставится агент отдельным этапом плейбука:
+
+```bash
+make monitoring
+```
+
+Команда доустанавливает зависимости Galaxy и прогоняет плейбук с тегом
+`monitoring`. На серверы приложение при этом не перевыкладывается.
+
+### Как это устроено в плейбуке
+
+Установку делает официальная коллекция
+[`datadog.dd`](https://galaxy.ansible.com/ui/repo/published/datadog/dd/) —
+в плейбуке подключается её роль `datadog.dd.agent`:
+
+```yaml
+- name: Set up Datadog monitoring
+  hosts: webservers
+  become: true
+  tags: monitoring
+
+  roles:
+    - datadog.dd.agent
+```
+
+Роль подключает apt-репозиторий DataDog, ставит пакет `datadog-agent`,
+пишет конфиги и запускает службу. `hosts: webservers` — агент появляется
+только на веб-серверах.
+
+Перед ролью стоит проверка (`assert`): если `vault_datadog_api_key` остался
+незаполненным, плейбук сразу останавливается с подсказкой. Без этой проверки
+агент установился бы, но молча не смог отправить ни одной метрики.
+
+### Что нужно сделать один раз
+
+1. Зарегистрироваться на https://www.datadoghq.com/ (бесплатный пробный
+   период). При регистрации выбирается регион (site) — он влияет на то, куда
+   агент шлёт данные. В проекте выставлен `datadog_site: datadoghq.com`
+   (регион US1, вход через `app.datadoghq.com`). Если аккаунт в другом
+   регионе, поменяйте значение в `group_vars/webservers/vars.yml`, например
+   на `datadoghq.eu`.
+2. Взять API-ключ: **Organization Settings → API Keys** (или на странице
+   быстрого старта агента). Ключ — строка из 32 символов, это секрет.
+3. Вписать ключ в зашифрованный файл секретов:
+
+```bash
+make vault-edit
+```
+
+Заменить заглушку на настоящее значение:
+
+```yaml
+vault_datadog_api_key: 0123456789abcdef0123456789abcdef
+```
+
+4. Запустить `make monitoring`.
+
+Через одну-две минуты серверы появятся в DataDog в разделе
+**Infrastructure → Host Map** с тегами `env:production`, `service:redmine`,
+`role:webserver`.
+
+### Проверка приложения — http_check
+
+Одних метрик сервера мало: процессор может простаивать, а приложение при этом
+лежать. За это отвечает интеграция
+[http_check](https://docs.datadoghq.com/integrations/http_check/) — агент сам
+ходит по указанным адресам и сообщает, ответило приложение или нет.
+
+Настраивается она переменной `datadog_checks` в
+`group_vars/webservers/vars.yml`. Роль превращает её в файл
+`/etc/datadog-agent/conf.d/http_check.d/conf.yaml` на сервере:
+
+```yaml
+datadog_checks:
+  http_check:
+    init_config:
+    instances:
+      - name: "redmine on {{ inventory_hostname }}"
+        url: "http://127.0.0.1:{{ redmine_port }}/"
+        timeout: 5
+        collect_response_time: true
+        http_response_status_code: "200"
+        tags:
+          - "service:redmine"
+          - "check:local"
+          - "host_alias:{{ inventory_hostname }}"
+      - name: "redmine public endpoint"
+        url: "{{ redmine_public_url }}"
+        timeout: 10
+        collect_response_time: true
+        check_certificate_expiration: true
+        days_warning: 14
+        days_critical: 7
+        tags:
+          - "service:redmine"
+          - "check:public"
+```
+
+Проверки две:
+
+- **локальная** — агент стучится в контейнер на своём же сервере
+  (`http://127.0.0.1:8080/`) и ждёт строго `200`. Так видно состояние
+  конкретного сервера отдельно от балансировщика: если упадёт только `web2`,
+  это будет видно сразу;
+- **публичная** — запрос по домену через балансировщик
+  (`https://rubinshtein.online/`). Дополнительно включена проверка
+  сертификата: `days_warning: 14` и `days_critical: 7` — предупреждение
+  за две недели до истечения и тревога за неделю.
+
+Что появляется в DataDog:
+
+| Что | Название | Смысл |
+| --- | --- | --- |
+| service check | `http.can_connect` | `OK` — адрес ответил, `CRITICAL` — нет |
+| service check | `http.ssl_cert` | состояние SSL-сертификата домена |
+| метрика | `network.http.response_time` | время ответа в секундах |
+| метрика | `http.ssl.days_left` | сколько дней осталось до конца сертификата |
+
+Найти их в интерфейсе: **Metrics → Explorer** для метрик и
+**Monitors → Manage Monitors** для настройки оповещений. Условие для
+оповещения о падении приложения — `http.can_connect` в состоянии `CRITICAL`
+по тегу `service:redmine`.
+
+### Проверка на сервере
+
+Статус агента и результаты проверок:
+
+```bash
+ssh ubuntu@94.131.84.114 'sudo datadog-agent status'
+```
+
+В выводе интересны два блока: `API Keys status` (ключ принят) и раздел
+`http_check` в `Running Checks` — там видно `Instances: 2` и сколько раз
+проверка отработала.
+
+Прогнать только http_check и посмотреть, что именно уходит в облако:
+
+```bash
+ssh ubuntu@94.131.84.114 'sudo datadog-agent check http_check'
+```
+
+Сгенерированный конфиг и служба:
+
+```bash
+ssh ubuntu@94.131.84.114 'sudo cat /etc/datadog-agent/conf.d/http_check.d/conf.yaml'
+ssh ubuntu@94.131.84.114 'systemctl status datadog-agent --no-pager'
+```
+
 ## Проверка
 
 Приложение на самих серверах:
@@ -270,6 +514,28 @@ echo | openssl s_client -connect rubinshtein.online:443 \
 ssh ubuntu@94.131.84.114 'docker ps; docker logs --tail 20 redmine'
 ```
 
+Проверить, что контейнер смотрит именно в управляемую базу:
+
+```bash
+ssh ubuntu@94.131.84.114 \
+  'docker inspect redmine --format "{{range .Config.Env}}{{println .}}{{end}}" \
+   | grep -E "REDMINE_DB_(POSTGRES|PORT|DATABASE|USERNAME)|PGSSLMODE"'
+```
+
+Подключиться к базе прямо с сервера, ничего не устанавливая (пароль
+подставьте свой):
+
+```bash
+ssh ubuntu@94.131.84.114 \
+  'docker run --rm -e PGPASSWORD=ПАРОЛЬ postgres:17-alpine psql \
+     "host=c-a0durkqssggbc2pu0mga.rw.mdb.yandexcloud.kz port=6432 dbname=db1 \
+      user=ubuntu sslmode=require" \
+     -c "select count(*) from information_schema.tables where table_schema='"'"'public'"'"';"'
+```
+
+После первого запуска Redmine в базе появляется около 60 таблиц — это
+и есть признак того, что приложение развернуло схему в общей базе.
+
 Убедиться, что балансировщик распределяет запросы по обоим серверам, можно
 сравнив количество запросов в логах за последние минуты:
 
@@ -288,7 +554,15 @@ ssh ubuntu@94.131.80.53  'docker logs --since 4m redmine | grep -c "Started GET"
   (`/usr/local/lib/python3.10/dist-packages`) и подтягивает свежие `requests`
   и `urllib3`, перекрывая системные версии. Для учебного сервера это нормально,
   в продакшене лучше использовать virtualenv или пакет `python3-docker` из apt.
-- У каждого сервера своя независимая база данных. Для учебного проекта этого
-  достаточно, но в реальной системе нужна одна общая база и общее хранилище
-  файлов, иначе пользователь будет видеть разные данные в зависимости от того,
-  на какой сервер его отправит балансировщик.
+- Раньше PostgreSQL поднимался контейнером на каждом сервере, и у серверов были
+  независимые базы. Теперь база одна на всех — управляемый кластер. Старые
+  контейнеры `redmine-db` остановлены, но не удалены; вместе с томами
+  `redmine_db_data` они хранят прежние данные. Когда данные больше не нужны:
+  `ssh ubuntu@СЕРВЕР 'docker rm redmine-db && docker volume rm redmine_db_data'`.
+- Хранилище загруженных файлов осталось локальным (том `redmine_files` на
+  каждом сервере). Если пользователь приложит файл к задаче, он попадёт только
+  на тот сервер, который обработал запрос. В реальной системе для этого нужно
+  общее сетевое хранилище или объектное хранилище.
+- Управляемый кластер тарифицируется, даже когда простаивает. Если он
+  остановлен (`Stopped`), Redmine не запустится: контейнер будет падать
+  с ошибкой подключения к базе.
