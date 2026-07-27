@@ -1,0 +1,22 @@
+---
+pip_install_packages:
+  - name: docker
+
+docker_users:
+  - "{{ ansible_user | default(ansible_user_id) }}"
+
+redmine_port: 8080
+redmine_dir: /opt/redmine
+redmine_network: redmine_net
+
+redmine_image: redmine:6.1
+redmine_container: redmine
+redmine_files_volume: redmine_files
+
+redmine_db_image: postgres:17-alpine
+redmine_db_container: redmine-db
+redmine_db_volume: redmine_db_data
+redmine_db_name: redmine
+redmine_db_user: redmine
+redmine_db_password: "{{ vault_redmine_db_password }}"
+redmine_secret_key_base: "{{ vault_redmine_secret_key_base }}"

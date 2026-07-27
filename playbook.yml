@@ -2,6 +2,7 @@
 - name: Prepare servers for deploy
   hosts: all
   become: true
+  tags: setup
 
   pre_tasks:
     - name: Update apt cache
@@ -12,3 +13,74 @@
   roles:
     - geerlingguy.pip
     - geerlingguy.docker
+
+- name: Deploy Redmine
+  hosts: all
+  become: true
+  tags: deploy
+
+  tasks:
+    - name: Ensure application directory exists
+      ansible.builtin.file:
+        path: "{{ redmine_dir }}"
+        state: directory
+        mode: "0750"
+
+    - name: Create .env file from template
+      ansible.builtin.template:
+        src: templates/.env.j2
+        dest: "{{ redmine_dir }}/.env"
+        mode: "0600"
+
+    - name: Ensure docker network exists
+      community.docker.docker_network:
+        name: "{{ redmine_network }}"
+        state: present
+
+    - name: Run PostgreSQL container
+      community.docker.docker_container:
+        name: "{{ redmine_db_container }}"
+        image: "{{ redmine_db_image }}"
+        env_file: "{{ redmine_dir }}/.env"
+        networks:
+          - name: "{{ redmine_network }}"
+        volumes:
+          - "{{ redmine_db_volume }}:/var/lib/postgresql/data"
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready -U {{ redmine_db_user }} -d {{ redmine_db_name }}"]
+          interval: 5s
+          timeout: 5s
+          retries: 12
+        restart_policy: unless-stopped
+        state: started
+
+    - name: Wait for PostgreSQL to become healthy
+      community.docker.docker_container_info:
+        name: "{{ redmine_db_container }}"
+      register: redmine_db_state
+      until: redmine_db_state.container.State.Health.Status | default('starting') == 'healthy'
+      retries: 30
+      delay: 5
+
+    - name: Run Redmine container
+      community.docker.docker_container:
+        name: "{{ redmine_container }}"
+        image: "{{ redmine_image }}"
+        env_file: "{{ redmine_dir }}/.env"
+        networks:
+          - name: "{{ redmine_network }}"
+        published_ports:
+          - "{{ redmine_port }}:3000"
+        volumes:
+          - "{{ redmine_files_volume }}:/usr/src/redmine/files"
+        restart_policy: unless-stopped
+        state: started
+
+    - name: Wait for Redmine to answer over HTTP
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ redmine_port }}/"
+        status_code: 200
+      register: redmine_http
+      until: redmine_http.status == 200
+      retries: 40
+      delay: 5
