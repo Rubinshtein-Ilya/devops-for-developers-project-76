@@ -31,6 +31,7 @@
             web1 94.131.84.114     web2 94.131.80.53
             ┌──────────────────┐   ┌──────────────────┐
             │ redmine   :8080  │   │ redmine   :8080  │
+            │ datadog-agent    │   │ datadog-agent    │
             └──────────────────┘   └──────────────────┘
                     |                     |
                     └──────────┬──────────┘
@@ -64,7 +65,7 @@ python3 -m pip install --user ansible
 
 | Файл | Назначение |
 | --- | --- |
-| `playbook.yml` | плейбук: подготовка серверов (тег `setup`) и деплой (тег `deploy`) |
+| `playbook.yml` | плейбук: подготовка серверов (тег `setup`), деплой (тег `deploy`) и мониторинг (тег `monitoring`) |
 | `inventory.ini` | список серверов, группа `webservers` |
 | `ansible.cfg` | инвентарь по умолчанию и путь к паролю от vault |
 | `requirements.yml` | зависимости Ansible Galaxy: роли и коллекция |
@@ -118,7 +119,8 @@ make install
 
 Ставятся роли [geerlingguy.pip](https://galaxy.ansible.com/ui/standalone/roles/geerlingguy/pip/),
 [geerlingguy.docker](https://galaxy.ansible.com/ui/standalone/roles/geerlingguy/docker/)
-и коллекция [community.docker](https://galaxy.ansible.com/ui/repo/published/community/docker/).
+и коллекции [community.docker](https://galaxy.ansible.com/ui/repo/published/community/docker/)
+и [datadog.dd](https://galaxy.ansible.com/ui/repo/published/datadog/dd/) (агент мониторинга).
 
 Коллекция закреплена на ветке 4.x: версии 5.x требуют ansible-core 2.17 и новее.
 Если у вас ansible-core 2.17+, ограничение в `requirements.yml` можно снять.
@@ -221,6 +223,11 @@ make deploy
 | `redmine_db_name` | `db1` | имя базы |
 | `redmine_db_user` | `ubuntu` | пользователь базы |
 | `redmine_db_sslmode` | `require` | режим шифрования соединения с базой |
+| `redmine_public_url` | `https://rubinshtein.online/` | публичный адрес приложения, его проверяет `http_check` |
+| `datadog_site` | `datadoghq.com` | регион аккаунта DataDog, куда агент шлёт данные |
+| `datadog_agent_major_version` | `7` | мажорная версия агента |
+| `datadog_config` | теги `env`, `service`, `role` | содержимое основного конфига агента `datadog.yaml` |
+| `datadog_checks` | `http_check` | конфигурации интеграций агента |
 
 Переменные для ролей Galaxy (`pip_install_packages`, `docker_users`) остались
 в `group_vars/all/vars.yml` — они нужны всем хостам, а не только веб-серверам.
@@ -231,6 +238,7 @@ make deploy
 | --- | --- |
 | `vault_redmine_db_password` | пароль пользователя базы |
 | `vault_redmine_secret_key_base` | ключ Redmine для подписи сессий |
+| `vault_datadog_api_key` | API-ключ аккаунта DataDog |
 
 В `vars.yml` они подключаются ссылками, например
 `redmine_db_password: "{{ vault_redmine_db_password }}"` — сразу видно, что
@@ -317,6 +325,163 @@ _acme-challenge.rubinshtein.online. CNAME <идентификатор_серти
 Нужна только одна запись — CNAME **либо** TXT; если добавить обе сразу,
 проверка не пройдёт. После выпуска сертификат выбирается в настройках
 обработчика на порту 443.
+
+## Мониторинг: агент DataDog
+
+На каждый сервер группы `webservers` ставится агент
+[DataDog](https://www.datadoghq.com/) — небольшая служба, которая раз в
+несколько секунд снимает показатели сервера (процессор, память, диск, сеть)
+и отправляет их в облако DataDog. Там из них строятся графики и настраиваются
+оповещения: если приложение перестанет отвечать или закончится память, придёт
+уведомление.
+
+Ставится агент отдельным этапом плейбука:
+
+```bash
+make monitoring
+```
+
+Команда доустанавливает зависимости Galaxy и прогоняет плейбук с тегом
+`monitoring`. На серверы приложение при этом не перевыкладывается.
+
+### Как это устроено в плейбуке
+
+Установку делает официальная коллекция
+[`datadog.dd`](https://galaxy.ansible.com/ui/repo/published/datadog/dd/) —
+в плейбуке подключается её роль `datadog.dd.agent`:
+
+```yaml
+- name: Set up Datadog monitoring
+  hosts: webservers
+  become: true
+  tags: monitoring
+
+  roles:
+    - datadog.dd.agent
+```
+
+Роль подключает apt-репозиторий DataDog, ставит пакет `datadog-agent`,
+пишет конфиги и запускает службу. `hosts: webservers` — агент появляется
+только на веб-серверах.
+
+Перед ролью стоит проверка (`assert`): если `vault_datadog_api_key` остался
+незаполненным, плейбук сразу останавливается с подсказкой. Без этой проверки
+агент установился бы, но молча не смог отправить ни одной метрики.
+
+### Что нужно сделать один раз
+
+1. Зарегистрироваться на https://www.datadoghq.com/ (бесплатный пробный
+   период). При регистрации выбирается регион (site) — он влияет на то, куда
+   агент шлёт данные. В проекте выставлен `datadog_site: datadoghq.com`
+   (регион US1, вход через `app.datadoghq.com`). Если аккаунт в другом
+   регионе, поменяйте значение в `group_vars/webservers/vars.yml`, например
+   на `datadoghq.eu`.
+2. Взять API-ключ: **Organization Settings → API Keys** (или на странице
+   быстрого старта агента). Ключ — строка из 32 символов, это секрет.
+3. Вписать ключ в зашифрованный файл секретов:
+
+```bash
+make vault-edit
+```
+
+Заменить заглушку на настоящее значение:
+
+```yaml
+vault_datadog_api_key: 0123456789abcdef0123456789abcdef
+```
+
+4. Запустить `make monitoring`.
+
+Через одну-две минуты серверы появятся в DataDog в разделе
+**Infrastructure → Host Map** с тегами `env:production`, `service:redmine`,
+`role:webserver`.
+
+### Проверка приложения — http_check
+
+Одних метрик сервера мало: процессор может простаивать, а приложение при этом
+лежать. За это отвечает интеграция
+[http_check](https://docs.datadoghq.com/integrations/http_check/) — агент сам
+ходит по указанным адресам и сообщает, ответило приложение или нет.
+
+Настраивается она переменной `datadog_checks` в
+`group_vars/webservers/vars.yml`. Роль превращает её в файл
+`/etc/datadog-agent/conf.d/http_check.d/conf.yaml` на сервере:
+
+```yaml
+datadog_checks:
+  http_check:
+    init_config:
+    instances:
+      - name: "redmine on {{ inventory_hostname }}"
+        url: "http://127.0.0.1:{{ redmine_port }}/"
+        timeout: 5
+        collect_response_time: true
+        http_response_status_code: "200"
+        tags:
+          - "service:redmine"
+          - "check:local"
+          - "host_alias:{{ inventory_hostname }}"
+      - name: "redmine public endpoint"
+        url: "{{ redmine_public_url }}"
+        timeout: 10
+        collect_response_time: true
+        check_certificate_expiration: true
+        days_warning: 14
+        days_critical: 7
+        tags:
+          - "service:redmine"
+          - "check:public"
+```
+
+Проверки две:
+
+- **локальная** — агент стучится в контейнер на своём же сервере
+  (`http://127.0.0.1:8080/`) и ждёт строго `200`. Так видно состояние
+  конкретного сервера отдельно от балансировщика: если упадёт только `web2`,
+  это будет видно сразу;
+- **публичная** — запрос по домену через балансировщик
+  (`https://rubinshtein.online/`). Дополнительно включена проверка
+  сертификата: `days_warning: 14` и `days_critical: 7` — предупреждение
+  за две недели до истечения и тревога за неделю.
+
+Что появляется в DataDog:
+
+| Что | Название | Смысл |
+| --- | --- | --- |
+| service check | `http.can_connect` | `OK` — адрес ответил, `CRITICAL` — нет |
+| service check | `http.ssl_cert` | состояние SSL-сертификата домена |
+| метрика | `network.http.response_time` | время ответа в секундах |
+| метрика | `http.ssl.days_left` | сколько дней осталось до конца сертификата |
+
+Найти их в интерфейсе: **Metrics → Explorer** для метрик и
+**Monitors → Manage Monitors** для настройки оповещений. Условие для
+оповещения о падении приложения — `http.can_connect` в состоянии `CRITICAL`
+по тегу `service:redmine`.
+
+### Проверка на сервере
+
+Статус агента и результаты проверок:
+
+```bash
+ssh ubuntu@94.131.84.114 'sudo datadog-agent status'
+```
+
+В выводе интересны два блока: `API Keys status` (ключ принят) и раздел
+`http_check` в `Running Checks` — там видно `Instances: 2` и сколько раз
+проверка отработала.
+
+Прогнать только http_check и посмотреть, что именно уходит в облако:
+
+```bash
+ssh ubuntu@94.131.84.114 'sudo datadog-agent check http_check'
+```
+
+Сгенерированный конфиг и служба:
+
+```bash
+ssh ubuntu@94.131.84.114 'sudo cat /etc/datadog-agent/conf.d/http_check.d/conf.yaml'
+ssh ubuntu@94.131.84.114 'systemctl status datadog-agent --no-pager'
+```
 
 ## Проверка
 

@@ -54,3 +54,22 @@
       until: redmine_http.status == 200
       retries: 40
       delay: 5
+
+- name: Set up Datadog monitoring
+  hosts: webservers
+  become: true
+  tags: monitoring
+
+  pre_tasks:
+    - name: Ensure the Datadog API key is set
+      ansible.builtin.assert:
+        that:
+          - datadog_api_key is defined
+          - datadog_api_key | length == 32
+        fail_msg: >-
+          Put a real Datadog API key into vault_datadog_api_key
+          (make vault-edit): it must be 32 characters long.
+        quiet: true
+
+  roles:
+    - datadog.dd.agent

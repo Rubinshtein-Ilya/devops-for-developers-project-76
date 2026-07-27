@@ -2,7 +2,7 @@ INVENTORY = inventory.ini
 PLAYBOOK  = playbook.yml
 VAULT     = group_vars/webservers/vault.yml
 
-.PHONY: install ping setup deploy vault-edit vault-view vault-encrypt vault-decrypt vault-rekey
+.PHONY: install ping setup deploy monitoring vault-edit vault-view vault-encrypt vault-decrypt vault-rekey
 
 install:
 	ansible-galaxy install -r requirements.yml
@@ -15,6 +15,9 @@ setup: install
 
 deploy:
 	ansible-playbook -i $(INVENTORY) $(PLAYBOOK) --tags deploy
+
+monitoring: install
+	ansible-playbook -i $(INVENTORY) $(PLAYBOOK) --tags monitoring
 
 vault-edit:
 	ansible-vault edit $(VAULT)
