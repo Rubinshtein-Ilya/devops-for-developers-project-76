@@ -11,7 +11,7 @@
 
 ## Задеплоенное приложение
 
-**https://rubinshtein.online**
+[https://rubinshtein.online](https://rubinshtein.online)
 
 Логин и пароль администратора по умолчанию — `admin` / `admin`
 (Redmine попросит сменить пароль при первом входе).
@@ -51,6 +51,7 @@
 ## Требования
 
 - [Ansible](https://docs.ansible.com/) (ansible-core 2.15 и новее)
+- [ansible-lint](https://ansible.readthedocs.io/projects/lint/) — только для `make lint`
 - `make`
 - SSH-доступ к серверам по ключу, пользователь с правами `sudo`
 - Серверы на Ubuntu (проверено на 22.04 LTS)
@@ -58,7 +59,7 @@
 Установка Ansible на macOS/Linux:
 
 ```bash
-python3 -m pip install --user ansible
+python3 -m pip install --user ansible ansible-lint
 ```
 
 ## Структура проекта
@@ -73,7 +74,7 @@ python3 -m pip install --user ansible
 | `group_vars/webservers/vars.yml` | открытые переменные приложения и подключения к БД |
 | `group_vars/webservers/vault.yml` | секреты, файл целиком зашифрован `ansible-vault` |
 | `templates/.env.j2` | шаблон файла переменных окружения для контейнера |
-| `Makefile` | команды установки, деплоя и работы с секретами |
+| `Makefile` | команды установки, проверок кода, деплоя и работы с секретами |
 
 ## Подготовка
 
@@ -125,7 +126,23 @@ make install
 Коллекция закреплена на ветке 4.x: версии 5.x требуют ansible-core 2.17 и новее.
 Если у вас ansible-core 2.17+, ограничение в `requirements.yml` можно снять.
 
-### 4. Проверить связь с серверами
+### 4. Прогнать проверки кода
+
+```bash
+make test
+```
+
+Команда объединяет две проверки, их можно запускать и по отдельности:
+
+| Команда | Что делает |
+| --- | --- |
+| `make check` | `ansible-playbook --syntax-check` — разбирает плейбук, инвентарь и все `group_vars`, включая расшифровку vault. Ловит опечатки в YAML и битый пароль от vault |
+| `make lint` | `ansible-lint` — проверяет стиль и типичные ошибки: неявные имена задач, устаревшие модули, отсутствие `mode` у файлов |
+
+Серверы для этого не нужны — обе проверки работают локально. Ожидаемый вывод
+`make lint` — `Passed: 0 failure(s), 0 warning(s)`.
+
+### 5. Проверить связь с серверами
 
 ```bash
 make ping
